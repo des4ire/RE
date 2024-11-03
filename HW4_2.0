@@ -1,0 +1,224 @@
+
+; Program to write 512-byte data to the first and second sectors, read them back,
+; sum them byte by byte (with carry), and store the result in buf3 across sectors 3 and 4.
+
+org 100h          ; Start of the program for COM file
+
+jmp start         ; Jump to the start label
+
+; Data Definitions
+data_bytes db 512 dup(0xAA)    ; Define 512 bytes of data filled with 0xAA
+data_bytes2 db 512 dup(0xFF)   ; Define 512 bytes of data filled with 0xFF
+sector_buffer db 512 dup(0)    ; Define a 512-byte buffer initialized to zero
+buf1 db 512 dup(0)             ; Buffer to store data read from sector 1
+buf2 db 512 dup(0)             ; Buffer to store data read from sector 2
+buf3 db 1024 dup(0)            ; Buffer to store the sum of buf1 and buf2
+write_status db 0              ; Flag to check if writes were successful
+
+; Function: write_sector
+; Purpose:  Writes a sector to a specified location on the floppy disk
+; Input:    BX = Offset address of the buffer to write
+;           CX = Sector number to write to
+; Clobbers: AX, DX
+write_sector:
+    push bx                   ; Save registers that will be modified
+    push cx
+    push dx
+
+    mov ax, cs                ; Move code segment into AX as intermediate
+    mov es, ax                ; Set ES to CS through AX (buffer segment)
+    
+    ; Set up registers for disk write
+    mov ah, 03h               ; AH = 03h, BIOS Disk Service for Write Sector
+    mov al, 01h               ; AL = 01h, Number of sectors to write (1 sector)
+    mov ch, 00h               ; CH = Cylinder number (0 for the first track)
+    mov dh, 00h               ; DH = Head number (0 for the first side of the disk)
+    mov dl, 00h               ; DL = Drive number (00h for floppy A:)
+
+    int 13h                   ; Call BIOS Disk Service
+    jc write_error            ; If carry flag set, jump to error
+
+    pop dx                    ; Restore registers
+    pop cx
+    pop bx
+    ret                       ; Return if successful
+
+write_error:
+    ; Set write_status to 1 to indicate failure
+    mov [write_status], 1
+    pop dx                    ; Restore registers
+    pop cx
+    pop bx
+    ret                       ; Return with error
+
+; Function: read_sector
+; Purpose:  Reads a sector from a specified location on the floppy disk
+; Input:    BX = Offset address of the buffer to store data
+;           CX = Sector number to read from
+; Clobbers: AX, DX
+read_sector:
+    push bx                   ; Save registers that will be modified
+    push cx
+    push dx
+
+    mov ax, cs                ; Move code segment into AX as intermediate
+    mov es, ax                ; Set ES to CS through AX (buffer segment)
+    
+    ; Set up registers for disk read
+    mov ah, 02h               ; AH = 02h, BIOS Disk Service for Read Sector
+    mov al, 01h               ; AL = 01h, Number of sectors to read (1 sector)
+    mov ch, 00h               ; CH = Cylinder number (0 for the first track)
+    mov dh, 00h               ; DH = Head number (0 for the first side of the disk)
+    mov dl, 00h               ; DL = Drive number (00h for floppy A:)
+
+    int 13h                   ; Call BIOS Disk Service
+    jc read_error             ; If carry flag set, jump to error
+
+    pop dx                    ; Restore registers
+    pop cx
+    pop bx
+    ret                       ; Return if successful
+
+read_error:
+    ; Display error message if read fails
+    mov dx, offset error_msg
+    mov ah, 09h               ; AH = 09h, DOS print string function
+    int 21h                   ; Display error message
+    pop dx                    ; Restore registers
+    pop cx
+    pop bx
+    ret                       ; Return with error
+
+; Function: sum_buffers
+; Purpose:  Sums the values in buf1 and buf2 byte by byte, with carry handling
+; Output:   The result is stored in buf3 (1024 bytes)
+; Clobbers: AX, BX, CX
+sum_buffers:
+    mov cx, 512               ; Set up counter for 512 bytes
+    lea si, buf1              ; SI points to the start of buf1
+    lea di, buf2              ; DI points to the start of buf2
+    lea bx, buf3              ; BX points to the start of buf3
+    clc                       ; Clear the carry flag initially
+
+sum_loop:
+    ; Load bytes from buf1 and buf2
+    mov al, [si]              ; Load byte from buf1 into AL
+    adc al, [di]              ; Add byte from buf2 to AL, including carry
+    mov [bx], al              ; Store result in buf3
+
+    ; Increment pointers
+    inc si                    ; Move to next byte in buf1
+    inc di                    ; Move to next byte in buf2
+    inc bx                    ; Move to next byte in buf3
+    loop sum_loop             ; Decrement CX and repeat if CX != 0
+
+    ; If there's a final carry left after the loop, store it in the next byte in buf3
+    jnc sum_done              ; If there's no carry, we're done
+    mov [bx], 1               ; Otherwise, store the carry value (0x01) in the next byte of buf3
+
+sum_done:
+    ret                       ; Return from function
+
+; Function: write_buf3_to_sectors
+; Purpose:  Writes buf3 (1024 bytes) across sector 3 and sector 4
+; Input:    buf3 is pre-loaded with data to write
+write_buf3_to_sectors:
+    ; Write the first 512 bytes of buf3 to sector 3
+    mov bx, offset buf3       ; Set BX to the start of buf3
+    mov cx, 3                 ; Sector number for the first half (sector 3)
+    call write_sector         ; Write to sector 3
+
+    ; Check for write error
+    cmp [write_status], 1
+    je show_error             ; Jump to error if the write failed
+
+    ; Write the second 512 bytes of buf3 to sector 4
+    mov bx, offset buf3 + 512 ; Set BX to the second half of buf3
+    mov cx, 4                 ; Sector number for the second half (sector 4)
+    call write_sector         ; Write to sector 4
+
+    ; Check for write error
+    cmp [write_status], 1
+    je show_error             ; Jump to error if the write failed
+
+    ret                       ; Return if both writes are successful
+
+start:
+    ; Initialize data segment registers to match code segment
+    mov ax, cs                ; Load code segment address into AX
+    mov ds, ax                ; Set DS to the code segment
+    mov es, ax                ; Set ES to the code segment for data access
+
+    ; First write: Write data_bytes to the first sector
+    lea di, sector_buffer     ; DI points to start of sector_buffer
+    lea si, data_bytes        ; SI points to our first 512-byte data
+    mov cx, 512               ; Number of bytes to copy
+    rep movsb                 ; Copy 512 bytes from data_bytes to sector_buffer
+
+    ; Call write_sector function for the first sector
+    mov bx, offset sector_buffer ; Pass the buffer address in BX
+    mov cx, 1                 ; Pass sector number in CX (1 for the first sector)
+    call write_sector         ; Call the function to write to disk
+
+    ; Check if the first write was successful
+    cmp [write_status], 1
+    je show_error             ; Jump to error if the first write failed
+
+    ; Clear the buffer before the next write
+    mov di, offset sector_buffer
+    mov cx, 512
+    mov al, 0
+    rep stosb                 ; Fill the buffer with zeroes
+
+    ; Second write: Write data_bytes2 to the second sector
+    lea di, sector_buffer     ; DI points to start of sector_buffer
+    lea si, data_bytes2       ; SI points to our second 512-byte data
+    mov cx, 512               ; Number of bytes to copy
+    rep movsb                 ; Copy 512 bytes from data_bytes2 to sector_buffer
+
+    ; Call write_sector function for the second sector
+    mov bx, offset sector_buffer ; Pass the buffer address in BX
+    mov cx, 2                 ; Pass sector number in CX (2 for the second sector)
+    call write_sector         ; Call the function to write to disk
+
+    ; Check if the second write was successful
+    cmp [write_status], 1
+    je show_error             ; Jump to error if the second write failed
+
+    ; Read back data from sector 1 into buf1
+    mov bx, offset buf1       ; Pass buffer address for sector 1 read in BX
+    mov cx, 1                 ; Sector number in CX (1 for the first sector)
+    call read_sector          ; Call function to read sector 1
+
+    ; Read back data from sector 2 into buf2
+    mov bx, offset buf2       ; Pass buffer address for sector 2 read in BX
+    mov cx, 2                 ; Sector number in CX (2 for the second sector)
+    call read_sector          ; Call function to read sector 2
+
+    ; Sum buf1 and buf2, storing the result in buf3 (1024 bytes)
+    call sum_buffers          ; Sum buf1 and buf2, store result in buf3
+
+    ; Write buf3 to sectors 3 and 4 in little-endian format
+    call write_buf3_to_sectors
+
+success:
+    ; Display success message after all operations
+    mov dx, offset success_msg
+    mov ah, 09h               ; AH = 09h, DOS print string function
+    int 21h                   ; Display success message
+    jmp done                  ; Jump to program exit
+
+show_error:
+    ; Display error message if any write or read failed
+    mov dx, offset error_msg
+    mov ah, 09h               ; AH = 09h, DOS print string function
+    int 21h                   ; Display error message
+
+done:
+    ; Program exit
+    mov ah, 4Ch               ; AH = 4Ch, DOS terminate program
+    int 21h                   ; Return control to DOS
+
+; Data for messages
+success_msg db 'All operations complete!$', 0
+error_msg db 'Error occurred during write, read, or sum!$', 0
